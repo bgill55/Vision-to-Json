@@ -1,0 +1,5 @@
+{
+  "name": "VisionStruct",
+  "description": "An advanced Computer Vision & Data Serialization Engine that converts visual input into rigorous, machine-readable JSON formats using Gemini 1.5 Pro.",
+  "requestFramePermissions": []
+}
