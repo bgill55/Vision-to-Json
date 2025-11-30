@@ -239,5 +239,5 @@ app.post("/messages", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`VisionStruct MCP Server running on port ${PORT}`);
-  console.log(`SSE Endpoint: http://localhost:${PORT}/sse`);
+  console.log(`SSE Endpoint available at: /sse`);
 });
