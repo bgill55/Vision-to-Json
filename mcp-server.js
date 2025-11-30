@@ -108,130 +108,174 @@ Null Values: If a field is not applicable, set it to null rather than omitting i
 // Initialize Express App
 const app = express();
 app.use(cors());
+// CRITICAL FIX: Allow parsing of JSON bodies (required for MCP POST messages)
+app.use(express.json({ limit: "50mb" }));
 
 // Map to store transports for each session
-let transport = null;
+const sessions = new Map();
 
-// Initialize MCP Server
-const server = new Server(
-  {
-    name: "vision-struct",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
+// Helper to create a server instance for a specific session
+const createServer = () => {
+  const server = new Server(
+    {
+      name: "vision-struct",
+      version: "1.0.0",
     },
-  }
-);
-
-// List available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "vision_to_json",
-        description: "Analyze an image and convert its visual data into a rigorous, machine-readable JSON format.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            image: {
-              type: "string",
-              description: "Base64 encoded image data",
-            },
-            mimeType: {
-              type: "string",
-              description: "MIME type of the image (e.g., image/jpeg, image/png)",
-              default: "image/jpeg",
-            },
-          },
-          required: ["image"],
-        },
+    {
+      capabilities: {
+        tools: {},
       },
-    ],
-  };
-});
-
-// Handle tool execution
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "vision_to_json") {
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Error: API_KEY environment variable is missing.",
-          },
-        ],
-        isError: true,
-      };
     }
+  );
 
-    const { image, mimeType = "image/jpeg" } = request.params.arguments;
-
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      
-      const response = await ai.models.generateContent({
-        model: "gemini-3-pro-preview",
-        contents: {
-            parts: [
-              {
-                inlineData: {
-                  data: image,
-                  mimeType: mimeType,
-                },
+  // List available tools
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: [
+        {
+          name: "vision_to_json",
+          description: "Visual Analysis Tool. Use this tool when the user asks to analyze, describe, or convert an image into JSON. It provides a deep structural breakdown of the visual elements.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              image: {
+                type: "string",
+                description: "Base64 encoded image data (clean string, no data URI prefix)",
               },
-              {
-                text: "Perform full visual serialization.",
+              mimeType: {
+                type: "string",
+                description: "MIME type of the image (e.g., image/jpeg, image/png)",
+                default: "image/jpeg",
               },
-            ],
+            },
+            required: ["image"],
           },
-        config: {
-          systemInstruction: VISION_SYSTEM_INSTRUCTION,
         },
-      });
+      ],
+    };
+  });
 
-      const text = response.text || "";
-      const cleanedText = text.replace(/```json\n?|\n?```/g, "").trim();
+  // Handle tool execution
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name === "vision_to_json") {
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Error: API_KEY environment variable is missing.",
+            },
+          ],
+          isError: true,
+        };
+      }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: cleanedText,
+      let { image, mimeType = "image/jpeg" } = request.params.arguments;
+
+      // Clean base64 string if it contains headers
+      if (image && image.includes("base64,")) {
+        image = image.split("base64,")[1];
+      }
+
+      try {
+        console.log("Analyzing image with Gemini...");
+        const ai = new GoogleGenAI({ apiKey });
+        
+        const response = await ai.models.generateContent({
+          model: "gemini-3-pro-preview",
+          contents: {
+              parts: [
+                {
+                  inlineData: {
+                    data: image,
+                    mimeType: mimeType,
+                  },
+                },
+                {
+                  text: "Perform full visual serialization.",
+                },
+              ],
+            },
+          config: {
+            systemInstruction: VISION_SYSTEM_INSTRUCTION,
           },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error analyzing image: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
-        isError: true,
-      };
+        });
+
+        const text = response.text || "";
+        const cleanedText = text.replace(/```json\n?|\n?```/g, "").trim();
+
+        console.log("Analysis success.");
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: cleanedText,
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("Gemini Error:", error);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error analyzing image: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
-  }
 
-  throw new Error("Tool not found");
-});
+    throw new Error("Tool not found");
+  });
+
+  return server;
+};
 
 // SSE Endpoint for Shapes to connect to
 app.get("/sse", async (req, res) => {
-  console.log("New connection established via SSE");
-  transport = new SSEServerTransport("/messages", res);
+  console.log("New SSE connection init");
+  
+  const transport = new SSEServerTransport("/messages", res);
+  const server = createServer();
+  
   await server.connect(transport);
+
+  // Store the transport mapped to its session ID
+  const sessionId = transport.sessionId;
+  sessions.set(sessionId, transport);
+  console.log(`Session established: ${sessionId}`);
+
+  // Clean up on disconnect
+  res.on("close", () => {
+    console.log(`Session closed: ${sessionId}`);
+    sessions.delete(sessionId);
+  });
 });
 
 // Endpoint for receiving messages from Shapes
 app.post("/messages", async (req, res) => {
+  const sessionId = req.query.sessionId;
+  
+  if (!sessionId) {
+    console.log("POST /messages missing sessionId");
+    return res.status(400).send("Missing sessionId query parameter");
+  }
+
+  const transport = sessions.get(sessionId);
+  
   if (transport) {
-    await transport.handlePostMessage(req, res);
+    try {
+      await transport.handlePostMessage(req, res);
+    } catch (e) {
+      console.error("Error handling POST message:", e);
+      res.status(500).send("Internal Error");
+    }
   } else {
+    console.log(`Session not found for ID: ${sessionId}`);
     res.status(404).json({ error: "Session not found" });
   }
 });
