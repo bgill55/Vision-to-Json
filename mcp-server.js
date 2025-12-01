@@ -108,13 +108,13 @@ Null Values: If a field is not applicable, set it to null rather than omitting i
 // Initialize Express App
 const app = express();
 app.use(cors());
-// CRITICAL FIX: Allow parsing of JSON bodies (required for MCP POST messages)
+// Allow parsing of JSON bodies with larger limits for base64 image data
 app.use(express.json({ limit: "50mb" }));
 
-// Map to store transports for each session
+// Map to store active SSE transports for each connected session
 const sessions = new Map();
 
-// Helper to create a server instance for a specific session
+// Helper function to create a new MCP server instance for each session
 const createServer = () => {
   const server = new Server(
     {
@@ -128,9 +128,8 @@ const createServer = () => {
     }
   );
 
-  // List available tools
+  // Handler for when Shapes.inc asks "what tools do you have?"
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    console.log("Received ListToolsRequest");
     return {
       tools: [
         {
@@ -156,10 +155,10 @@ const createServer = () => {
     };
   });
 
-  // Handle tool execution
+  // Handler for when Shapes.inc actually calls the vision_to_json tool
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    console.log(`Received CallToolRequest: ${request.params.name}`);
     if (request.params.name === "vision_to_json") {
+      // Get the API key from environment variables
       const apiKey = process.env.API_KEY;
       if (!apiKey) {
         return {
@@ -173,42 +172,49 @@ const createServer = () => {
         };
       }
 
+      // Extract the image and mimeType from the tool call arguments
       let { image, mimeType = "image/jpeg" } = request.params.arguments;
 
-      // Clean base64 string if it contains headers
+      // Clean up the base64 string if it includes a data URI prefix
       if (image && image.includes("base64,")) {
         image = image.split("base64,")[1];
       }
 
       try {
         console.log("Analyzing image with Gemini...");
+        
+        // Use the modern @google/genai SDK
         const ai = new GoogleGenAI({ apiKey });
         
+        // Use gemini-2.5-flash (widely available, replaces the deprecated gemini-1.5-pro)
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents: {
-              parts: [
-                {
-                  inlineData: {
-                    data: image,
-                    mimeType: mimeType,
-                  },
+            parts: [
+              {
+                inlineData: {
+                  data: image,
+                  mimeType: mimeType,
                 },
-                {
-                  text: "Perform full visual serialization.",
-                },
-              ],
-            },
+              },
+              {
+                text: "Perform full visual serialization.",
+              },
+            ],
+          },
           config: {
             systemInstruction: VISION_SYSTEM_INSTRUCTION,
           },
         });
 
         const text = response.text || "";
+        
+        // Remove any markdown code fencing that Gemini might add
         const cleanedText = text.replace(/```json\n?|\n?```/g, "").trim();
 
         console.log("Analysis success.");
 
+        // Return the JSON analysis back to Shapes.inc
         return {
           content: [
             {
@@ -218,6 +224,7 @@ const createServer = () => {
           ],
         };
       } catch (error) {
+        // If anything goes wrong, log it and return an error message
         console.error("Gemini Error:", error);
         return {
           content: [
@@ -231,37 +238,38 @@ const createServer = () => {
       }
     }
 
+    // If someone calls a tool that doesn't exist, throw an error
     throw new Error("Tool not found");
   });
 
   return server;
 };
 
-// SSE Endpoint for Shapes to connect to
+// SSE Endpoint - This is where Shapes.inc initially connects
 app.get("/sse", async (req, res) => {
-  console.log("New SSE connection init");
+  console.log("New SSE connection initiated");
   
-  // Generate a new session ID for this connection
-  // Note: crypto is global in Node 19+ (Render uses 22)
-  const sessionId = crypto.randomUUID();
-  
-  // Important: Include the sessionId in the endpoint URL so the client knows where to POST
-  const transport = new SSEServerTransport(`/messages?sessionId=${sessionId}`, res);
-  
+  // Create a new SSE transport for this connection
+  // The SDK automatically handles appending the sessionId to the endpoint event if needed
+  const transport = new SSEServerTransport("/messages", res);
   const server = createServer();
+  
+  // Connect the MCP server to this transport
   await server.connect(transport);
 
+  // Store this session so we can handle messages for it later
+  const sessionId = transport.sessionId;
   sessions.set(sessionId, transport);
   console.log(`Session established: ${sessionId}`);
 
-  // Clean up on disconnect
+  // Clean up when the client disconnects
   res.on("close", () => {
     console.log(`Session closed: ${sessionId}`);
     sessions.delete(sessionId);
   });
 });
 
-// Endpoint for receiving messages from Shapes
+// POST endpoint - This is where Shapes.inc sends actual tool calls
 app.post("/messages", async (req, res) => {
   const sessionId = req.query.sessionId;
   
@@ -270,10 +278,12 @@ app.post("/messages", async (req, res) => {
     return res.status(400).send("Missing sessionId query parameter");
   }
 
+  // Look up the transport for this session
   const transport = sessions.get(sessionId);
   
   if (transport) {
     try {
+      // Let the transport handle the incoming message
       await transport.handlePostMessage(req, res);
     } catch (e) {
       console.error("Error handling POST message:", e);
@@ -285,6 +295,7 @@ app.post("/messages", async (req, res) => {
   }
 });
 
+// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`VisionStruct MCP Server running on port ${PORT}`);
