@@ -130,6 +130,7 @@ const createServer = () => {
 
   // List available tools
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    console.log("Received ListToolsRequest");
     return {
       tools: [
         {
@@ -157,6 +158,7 @@ const createServer = () => {
 
   // Handle tool execution
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    console.log(`Received CallToolRequest: ${request.params.name}`);
     if (request.params.name === "vision_to_json") {
       const apiKey = process.env.API_KEY;
       if (!apiKey) {
@@ -183,7 +185,7 @@ const createServer = () => {
         const ai = new GoogleGenAI({ apiKey });
         
         const response = await ai.models.generateContent({
-          model: "gemini-3-pro-preview",
+          model: "gemini-2.5-flash",
           contents: {
               parts: [
                 {
@@ -239,13 +241,16 @@ const createServer = () => {
 app.get("/sse", async (req, res) => {
   console.log("New SSE connection init");
   
-  const transport = new SSEServerTransport("/messages", res);
-  const server = createServer();
+  // Generate a new session ID for this connection
+  // Note: crypto is global in Node 19+ (Render uses 22)
+  const sessionId = crypto.randomUUID();
   
+  // Important: Include the sessionId in the endpoint URL so the client knows where to POST
+  const transport = new SSEServerTransport(`/messages?sessionId=${sessionId}`, res);
+  
+  const server = createServer();
   await server.connect(transport);
 
-  // Store the transport mapped to its session ID
-  const sessionId = transport.sessionId;
   sessions.set(sessionId, transport);
   console.log(`Session established: ${sessionId}`);
 
