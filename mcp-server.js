@@ -4,6 +4,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { GoogleGenAI } from "@google/genai";
+import mountMetadataRoutes from "./metadata-route.js";
 
 const VISION_SYSTEM_INSTRUCTION = `ROLE & OBJECTIVE
 
@@ -108,6 +109,10 @@ Null Values: If a field is not applicable, set it to null rather than omitting i
 // Initialize Express App
 const app = express();
 app.use(cors());
+
+// Mount metadata routes for discovery
+mountMetadataRoutes(app);
+
 // Allow parsing of JSON bodies with larger limits for base64 image data
 app.use(express.json({ limit: "50mb" }));
 
